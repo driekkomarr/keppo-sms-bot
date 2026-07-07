@@ -31,7 +31,7 @@ USD_TO_PHP_RATE = 60.50  # Base standard calculation index for incoming supplier
 SERVICES_PRICING = {
     "Shopee": {"code": "ds", "price": 15.00, "stock": 50},     
     "GCash": {"code": "ot", "price": 10.00, "stock": 50},      
-    "Any Other": {"code": "ot", "price": 5.00, "stock": 50}   
+    "Any Other": {"code": "ot", "price": 5.00, "stock": 51}   
 }
 
 # --- INITIALIZE CONNECTIONS ---
