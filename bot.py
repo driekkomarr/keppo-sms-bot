@@ -23,14 +23,15 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 HERO_SMS_KEY = os.getenv("HERO_SMS_API_KEY")
 HERO_SMS_URL = os.getenv("HERO_SMS_BASE_URL")
 
-# --- OFFICIAL COUNTRY CODE ---
+# --- GLOBAL CONFIGURATION METRICS ---
 PH_COUNTRY_ID = 4 
+USD_TO_PHP_RATE = 60.50  # Base standard calculation index for incoming supplier metrics
 
 # --- PRICING & LIVE DYNAMIC STOCK PROFILES ---
 SERVICES_PRICING = {
-    "Shopee": {"code": "ds", "price": 12.00, "stock": 50},     
-    "GCash": {"code": "ot", "price": 15.00, "stock": 50},      
-    "Any Other": {"code": "ot", "price": 18.00, "stock": 50}   
+    "Shopee": {"code": "ds", "price": 15.00, "stock": 50},     
+    "GCash": {"code": "ot", "price": 10.00, "stock": 50},      
+    "Any Other": {"code": "ot", "price": 5.00, "stock": 50}   
 }
 
 # --- INITIALIZE CONNECTIONS ---
@@ -57,12 +58,12 @@ async def db_execute(query_chain):
 
 # --- UTILITY FUNCTIONS ---
 def format_ph_number(raw_num: str) -> str:
-    cleaned = raw_num.strip().replace("+", "")
+    cleaned = raw_num.strip().replace("", "")
     if cleaned.startswith("63"): cleaned = cleaned[2:]
     if cleaned.startswith("0"): cleaned = cleaned[1:]
     return cleaned
 
-# --- UI KEYBOARDS (UPDATED TO MATCH IMAGE_5A841B.PNG) ---
+# --- UI KEYBOARDS (EXACT ALIGNMENT WITH IMAGE_5A841B.PNG) ---
 def main_menu_keyboard():
     builder = InlineKeyboardBuilder()
     # Row 1: 2 Columns
@@ -265,7 +266,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     except Exception: pass
     
     await db_execute(supabase.table("users").upsert({"telegram_id": tg_id, "username": username}, on_conflict="telegram_id"))
-    await message.answer("Welcome to Pinglong OTP Bot!\n\nTap any of the options below to get started.", reply_markup=main_menu_keyboard())
+    await message.answer("Welcome to OMAR OTP Bot!\n\nTap any of the options below to get started.", reply_markup=main_menu_keyboard())
 
 @router.message(Command("buy_again"))
 async def cmd_buy_again(message: types.Message):
@@ -282,7 +283,7 @@ async def cmd_buy_again(message: types.Message):
 @router.callback_query(F.data == "menu_main")
 async def cb_main_menu(callback: types.CallbackQuery, state: FSMContext):
     await state.clear() 
-    await callback.message.edit_text("Welcome to Pinglong OTP Bot!\n\nTap any of the options below to get started.", reply_markup=main_menu_keyboard())
+    await callback.message.edit_text("Welcome to OMAR OTP Bot!\n\nTap any of the options below to get started.", reply_markup=main_menu_keyboard())
 
 @router.callback_query(F.data == "menu_balance")
 async def cb_balance(callback: types.CallbackQuery):
@@ -308,7 +309,7 @@ async def cb_stocks(callback: types.CallbackQuery):
 async def cb_topup_start(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "💸 **Manual Balance Realization Route**\n\n"
-        "1. Remit your desired amount through GCash to: `09123456789` (Account: Name Placeholder)\n"
+        "1. Remit your desired amount through GCash to: `09563495650` (Account: OMAR A)\n"
         "2. Save the screenshot of the transaction receipt.\n\n"
         "📸 **Please upload/send the image of your GCash receipt now:**\n*(Or click Back to cancel)*",
         reply_markup=back_keyboard(), parse_mode="Markdown"
@@ -406,9 +407,8 @@ async def cb_execute_purchase(callback: types.CallbackQuery):
 async def initiate_number_purchase(msg: types.Message, user_id: int, service_name: str, is_callback: bool):
     service_meta = SERVICES_PRICING[service_name]
     
-    # 🚨 DYNAMIC INVENTORY INTERCEPTOR GUARD
     if service_meta["stock"] <= 0:
-        text = f"⚠️ **No stocks available!**\n\nThere are currently no lines left in stock for **{service_name}**. Please look for alternate apps or check back later."
+        text = f"⚠️ **No stocks available!**\n\nThere are currently no lines left in stock for **{service_name}**. Please check back later."
         return await msg.edit_text(text, reply_markup=back_keyboard(), parse_mode="Markdown") if is_callback else await msg.answer(text, reply_markup=back_keyboard(), parse_mode="Markdown")
 
     cost = service_meta["price"]
@@ -419,14 +419,55 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
         text = "❌ **Insufficient credit allocation context. Please perform a Top-Up.**"
         return await msg.edit_text(text, reply_markup=back_keyboard(), parse_mode="Markdown") if is_callback else await msg.answer(text, reply_markup=back_keyboard(), parse_mode="Markdown")
 
-    # Claim inventory allotment 
+    # Claim temporary allocation space
     service_meta["stock"] -= 1
 
     text_loading = "⏳ **Allocating secure network line resource... Please wait.**"
     status_msg = await msg.edit_text(text_loading, parse_mode="Markdown") if is_callback else await msg.answer(text_loading, parse_mode="Markdown")
 
     try:
-        resp = await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "getNumber", "service": service_code, "country": PH_COUNTRY_ID})
+        # 📊 LIVE MARKET RATE DETECTION WITH CURRENCY CONVERSION (INTERCEPTS TIERS FROM IMAGE_5AFC3A.PNG)
+        cheapest_operator = ""
+        try:
+            price_resp = await http_client.get(
+                HERO_SMS_URL, 
+                params={"api_key": HERO_SMS_KEY, "action": "getPrices", "service": service_code, "country": PH_COUNTRY_ID}
+            )
+            price_data = price_resp.json()
+            country_str = str(PH_COUNTRY_ID)
+            
+            if country_str in price_data and service_code in price_data[country_str]:
+                service_nodes = price_data[country_str][service_code]
+                lowest_market_cost_php = float('inf')
+                
+                for op_name, op_info in service_nodes.items():
+                    if op_info.get("count", 0) > 0:
+                        # Extract the raw wholesale USD rate, convert to PHP, and target the absolute minimum tier
+                        op_cost_usd = float(op_info.get("cost", 0))
+                        op_cost_php = op_cost_usd * USD_TO_PHP_RATE
+                        
+                        if op_cost_php < lowest_market_cost_php:
+                            lowest_market_cost_php = op_cost_php
+                            cheapest_operator = op_name
+                            
+                # Margin protection barrier mechanism
+                if lowest_market_cost_php != float('inf') and lowest_market_cost_php > cost:
+                    raise Exception("Wholesale price inflation exceeded retail limits.")
+        except Exception as api_err:
+            if "inflation exceeded" in str(api_err): raise api_err
+            cheapest_operator = "" # Failover gracefully if api returns errors
+
+        # Build dynamic payload arguments
+        api_params = {
+            "api_key": HERO_SMS_KEY, 
+            "action": "getNumber", 
+            "service": service_code, 
+            "country": PH_COUNTRY_ID
+        }
+        if cheapest_operator and cheapest_operator != "any":
+            api_params["operator"] = cheapest_operator
+
+        resp = await http_client.get(HERO_SMS_URL, params=api_params)
         
         if resp.text.startswith("ACCESS_NUMBER"):
             _, act_id, raw_phone = resp.text.split(":")
@@ -442,12 +483,12 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             asyncio.create_task(poll_for_incoming_otp(user_id, act_id, status_msg.message_id))
         
         elif "NO_NUMBERS" in resp.text:
-            service_meta["stock"] += 1 # Return allocation slot
+            service_meta["stock"] += 1 
             await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
             await status_msg.edit_text(f"⚠️ **Out of Stock!**\n\nNo available allocations for **{service_name}** in this region. Your ₱{cost:.2f} has been credited back.", reply_markup=back_keyboard(), parse_mode="Markdown")
             
         elif "NO_BALANCE" in resp.text:
-            service_meta["stock"] += 1 # Return allocation slot
+            service_meta["stock"] += 1 
             await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
             await status_msg.edit_text(f"❌ **System Notice:** Infrastructure node maintenance required. Balance refunded.", reply_markup=back_keyboard(), parse_mode="Markdown")
             
@@ -455,7 +496,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             raise Exception(f"Validation Failure: {resp.text}")
             
     except Exception as e:
-        service_meta["stock"] += 1 # Return allocation slot on failure
+        service_meta["stock"] += 1 
         await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
         await status_msg.edit_text(f"❌ **System error allocating number infrastructure:** {str(e)}", reply_markup=back_keyboard(), parse_mode="Markdown")
 
@@ -487,16 +528,16 @@ async def cb_lifecycle_mutation(callback: types.CallbackQuery):
     service_name = chk.data[0]["service"]
     phone_num = chk.data[0]["phone_number"]
     
-    # 📦 DYNAMIC INVENTORY INJECTION RETURN 
+    # 📦 DYNAMIC INVENTORY REFUND ENGINE
     if service_name in SERVICES_PRICING:
         SERVICES_PRICING[service_name]["stock"] += 1
 
     await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 8, "id": act_id})
 
     await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
-    await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": refund_val}))
+    db_call = await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": refund_val}))
 
-    # MATCHES EXACT TERMINATION LOG PATTERN OBSERVED IN IMAGE_5A841B.PNG
+    # MATCHES EXACT TERMINATION PATTERN FROM IMAGE_5A841B.PNG
     await callback.message.edit_text(
         f"✅ Number `{phone_num}` for service **{service_name}** has been successfully cancelled.\n\n"
         f"• Value ₱{refund_val:.2f} was restored safely to your internal balance allocation profile.",
