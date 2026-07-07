@@ -26,11 +26,11 @@ HERO_SMS_URL = os.getenv("HERO_SMS_BASE_URL")
 # --- OFFICIAL COUNTRY CODE ---
 PH_COUNTRY_ID = 4 
 
-# --- PRICING & SERVICE CODES ---
+# --- PRICING & LIVE DYNAMIC STOCK PROFILES ---
 SERVICES_PRICING = {
-    "Shopee": {"code": "ds", "price": 15.00},     
-    "GCash": {"code": "ot", "price": 10.00},      
-    "Any Other": {"code": "ot", "price": 5.00}   
+    "Shopee": {"code": "ds", "price": 12.00, "stock": 50},     
+    "GCash": {"code": "ot", "price": 15.00, "stock": 50},      
+    "Any Other": {"code": "ot", "price": 18.00, "stock": 50}   
 }
 
 # --- INITIALIZE CONNECTIONS ---
@@ -62,14 +62,23 @@ def format_ph_number(raw_num: str) -> str:
     if cleaned.startswith("0"): cleaned = cleaned[1:]
     return cleaned
 
-# --- UI KEYBOARDS ---
+# --- UI KEYBOARDS (UPDATED TO MATCH IMAGE_5A841B.PNG) ---
 def main_menu_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="💰 TOP UP", callback_data="menu_topup"))
-    builder.row(types.InlineKeyboardButton(text="💳 CHECK BALANCE", callback_data="menu_balance"))
-    builder.row(types.InlineKeyboardButton(text="📱 BUY NUMBER", callback_data="menu_buy"))
-    builder.row(types.InlineKeyboardButton(text="📊 STOCKS", callback_data="menu_stocks"))
-    builder.row(types.InlineKeyboardButton(text="📋 PRICE LIST", callback_data="menu_prices"))
+    # Row 1: 2 Columns
+    builder.row(
+        types.InlineKeyboardButton(text="📞 Buy Numbers", callback_data="menu_buy"),
+        types.InlineKeyboardButton(text="💵 Price List", callback_data="menu_prices")
+    )
+    # Row 2: 2 Columns
+    builder.row(
+        types.InlineKeyboardButton(text="💰 Balance", callback_data="menu_balance"),
+        types.InlineKeyboardButton(text="📦 Stocks", callback_data="menu_stocks")
+    )
+    # Row 3: Full Width
+    builder.row(
+        types.InlineKeyboardButton(text="💳 Top Up Balance", callback_data="menu_topup")
+    )
     return builder.as_markup()
 
 def back_keyboard():
@@ -146,7 +155,6 @@ async def cmd_admin(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return 
     await state.clear()
     
-    # Burn previous calling text command
     try: await message.delete()
     except Exception: pass
     
@@ -213,7 +221,6 @@ async def process_global_broadcast_blast(message: types.Message, state: FSMConte
     broadcast_text = message.text
     await state.clear()
     
-    # Burn calling text message to avoid clutter
     try: await message.delete()
     except Exception: pass
     
@@ -254,18 +261,16 @@ async def cmd_start(message: types.Message, state: FSMContext):
     tg_id = message.from_user.id
     username = message.from_user.username or "Anonymous"
     
-    # Burn calling text command instantly
     try: await message.delete()
     except Exception: pass
     
     await db_execute(supabase.table("users").upsert({"telegram_id": tg_id, "username": username}, on_conflict="telegram_id"))
-    await message.answer("👋 **Welcome to the Automated SMS Verification Hub**\nSelect an option from the panel below:", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+    await message.answer("Welcome to Pinglong OTP Bot!\n\nTap any of the options below to get started.", reply_markup=main_menu_keyboard())
 
 @router.message(Command("buy_again"))
 async def cmd_buy_again(message: types.Message):
     tg_id = message.from_user.id
     
-    # Burn incoming command
     try: await message.delete()
     except Exception: pass
     
@@ -277,7 +282,7 @@ async def cmd_buy_again(message: types.Message):
 @router.callback_query(F.data == "menu_main")
 async def cb_main_menu(callback: types.CallbackQuery, state: FSMContext):
     await state.clear() 
-    await callback.message.edit_text("👋 **Welcome to the Automated SMS Verification Hub**\nSelect an option from the panel below:", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+    await callback.message.edit_text("Welcome to Pinglong OTP Bot!\n\nTap any of the options below to get started.", reply_markup=main_menu_keyboard())
 
 @router.callback_query(F.data == "menu_balance")
 async def cb_balance(callback: types.CallbackQuery):
@@ -294,7 +299,8 @@ async def cb_prices(callback: types.CallbackQuery):
 @router.callback_query(F.data == "menu_stocks")
 async def cb_stocks(callback: types.CallbackQuery):
     text = "📊 **Live Available SIM Pools:**\n\n"
-    for s_name in SERVICES_PRICING.keys(): text += f"• **{s_name}**: ✅ High Available Stock\n"
+    for s_name, s_info in SERVICES_PRICING.items(): 
+        text += f"• **{s_name}**: `{s_info['stock']}` pcs available\n"
     await callback.message.edit_text(text, reply_markup=back_keyboard(), parse_mode="Markdown")
 
 # --- SECURE PHOTO TOP UP MODULE ---
@@ -322,7 +328,6 @@ async def process_topup_receipt(message: types.Message, state: FSMContext):
     username = message.from_user.username or "Anonymous"
     photo_id = message.photo[-1].file_id
 
-    # Burn user upload message to ensure pristine space
     try: await message.delete()
     except Exception: pass
 
@@ -400,6 +405,12 @@ async def cb_execute_purchase(callback: types.CallbackQuery):
 
 async def initiate_number_purchase(msg: types.Message, user_id: int, service_name: str, is_callback: bool):
     service_meta = SERVICES_PRICING[service_name]
+    
+    # 🚨 DYNAMIC INVENTORY INTERCEPTOR GUARD
+    if service_meta["stock"] <= 0:
+        text = f"⚠️ **No stocks available!**\n\nThere are currently no lines left in stock for **{service_name}**. Please look for alternate apps or check back later."
+        return await msg.edit_text(text, reply_markup=back_keyboard(), parse_mode="Markdown") if is_callback else await msg.answer(text, reply_markup=back_keyboard(), parse_mode="Markdown")
+
     cost = service_meta["price"]
     service_code = service_meta["code"]
 
@@ -408,7 +419,9 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
         text = "❌ **Insufficient credit allocation context. Please perform a Top-Up.**"
         return await msg.edit_text(text, reply_markup=back_keyboard(), parse_mode="Markdown") if is_callback else await msg.answer(text, reply_markup=back_keyboard(), parse_mode="Markdown")
 
-    # HIDDEN SECURITY SCRIPT LOADING TEXT
+    # Claim inventory allotment 
+    service_meta["stock"] -= 1
+
     text_loading = "⏳ **Allocating secure network line resource... Please wait.**"
     status_msg = await msg.edit_text(text_loading, parse_mode="Markdown") if is_callback else await msg.answer(text_loading, parse_mode="Markdown")
 
@@ -429,10 +442,12 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             asyncio.create_task(poll_for_incoming_otp(user_id, act_id, status_msg.message_id))
         
         elif "NO_NUMBERS" in resp.text:
+            service_meta["stock"] += 1 # Return allocation slot
             await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
             await status_msg.edit_text(f"⚠️ **Out of Stock!**\n\nNo available allocations for **{service_name}** in this region. Your ₱{cost:.2f} has been credited back.", reply_markup=back_keyboard(), parse_mode="Markdown")
             
         elif "NO_BALANCE" in resp.text:
+            service_meta["stock"] += 1 # Return allocation slot
             await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
             await status_msg.edit_text(f"❌ **System Notice:** Infrastructure node maintenance required. Balance refunded.", reply_markup=back_keyboard(), parse_mode="Markdown")
             
@@ -440,6 +455,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             raise Exception(f"Validation Failure: {resp.text}")
             
     except Exception as e:
+        service_meta["stock"] += 1 # Return allocation slot on failure
         await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
         await status_msg.edit_text(f"❌ **System error allocating number infrastructure:** {str(e)}", reply_markup=back_keyboard(), parse_mode="Markdown")
 
@@ -468,14 +484,25 @@ async def cb_lifecycle_mutation(callback: types.CallbackQuery):
         return await callback.answer("❌ This lease context is no longer active.", show_alert=True)
 
     refund_val = float(chk.data[0]["amount"])
+    service_name = chk.data[0]["service"]
+    phone_num = chk.data[0]["phone_number"]
     
+    # 📦 DYNAMIC INVENTORY INJECTION RETURN 
+    if service_name in SERVICES_PRICING:
+        SERVICES_PRICING[service_name]["stock"] += 1
+
     await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 8, "id": act_id})
 
     await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
-    db_call = await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": refund_val}))
+    await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": refund_val}))
 
-    await callback.message.edit_text(f"❌ **Lease Canceled Successfully.**\n\n• Transaction Value: ₱{refund_val:.2f}\n• Status: Credited Back to Balance\n• Updated Account Balance: ₱{(db_call.data if db_call.data else 0.00):.2f}", reply_markup=back_keyboard(), parse_mode="Markdown")
-    await callback.answer("Wallet balance refunded successfully.")
+    # MATCHES EXACT TERMINATION LOG PATTERN OBSERVED IN IMAGE_5A841B.PNG
+    await callback.message.edit_text(
+        f"✅ Number `{phone_num}` for service **{service_name}** has been successfully cancelled.\n\n"
+        f"• Value ₱{refund_val:.2f} was restored safely to your internal balance allocation profile.",
+        reply_markup=back_keyboard(), parse_mode="Markdown"
+    )
+    await callback.answer("Wallet balance and stock allocation refunded successfully.")
 
 # ==========================================
 # 🌍 HEALTH CHECK SERVER (FOR FREE HOSTING)
