@@ -31,7 +31,7 @@ USD_TO_PHP_RATE = 60.50  # Base standard calculation index for incoming supplier
 SERVICES_PRICING = {
     "Shopee": {"code": "ds", "price": 15.00, "stock": 50},     
     "GCash": {"code": "ot", "price": 10.00, "stock": 50},      
-    "Any Other": {"code": "ot", "price": 5.00, "stock": 51}   
+    "Any Other": {"code": "ot", "price": 5.00, "stock": 50}   
 }
 
 # --- INITIALIZE CONNECTIONS ---
@@ -479,7 +479,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             control_kb.row(types.InlineKeyboardButton(text="❌ Cancel", callback_data=f"act_cancel:{act_id}"), types.InlineKeyboardButton(text="⚠️ Report Used", callback_data=f"act_ban:{act_id}"))
             control_kb.row(types.InlineKeyboardButton(text="🔙 Main Menu (Leaves Monitor Active)", callback_data="menu_main"))
             
-            await status_msg.edit_text(f"📱 **Line Lease Active**\n\n• Platform: `{service_name}`\n• Phone Number: `+{ph_clean}`\n\n⏳ Waiting for verification transmission strings to arrive...", reply_markup=control_kb.as_markup(), parse_mode="Markdown")
+            await status_msg.edit_text(f"📱 **Line Lease Active**\n\n• Platform: `{service_name}`\n• Phone Number: `{ph_clean}`\n\n⏳ Waiting for verification transmission strings to arrive...", reply_markup=control_kb.as_markup(), parse_mode="Markdown")
             asyncio.create_task(poll_for_incoming_otp(user_id, act_id, status_msg.message_id))
         
         elif "NO_NUMBERS" in resp.text:
