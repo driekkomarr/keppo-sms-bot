@@ -400,7 +400,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             await status_msg.edit_text(
                 f"📱 **Line Lease Active**\n\n"
                 f"• Platform: `{service_name}`\n"
-                f"• Phone Number: `+{ph_clean}`\n\n"
+                f"• Phone Number: `{ph_clean}`\n\n"
                 f"⏳ Waiting for verification transmission strings to arrive...", 
                 reply_markup=control_kb.as_markup(), parse_mode="Markdown"
             )
