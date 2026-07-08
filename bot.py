@@ -1,3 +1,4 @@
+"""
 import os
 import asyncio
 import httpx
@@ -639,3 +640,5 @@ if __name__ == "__main__":
     dp.include_router(router)
     dp.startup.register(on_startup)
     asyncio.run(dp.start_polling(bot))
+
+"""
