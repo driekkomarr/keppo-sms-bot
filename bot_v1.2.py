@@ -93,8 +93,7 @@ def admin_back_keyboard() -> types.InlineKeyboardMarkup:
 # ==========================================
 
 async def send_or_edit_transient(message: types.Message, state: FSMContext, text: str, reply_markup: types.InlineKeyboardMarkup):
-    """Prevents chat spam by editing the single floating UI box instead of sending new ones."""
-    try: await message.delete() # Delete the user's input tap
+    try: await message.delete()
     except Exception: pass
 
     session_data = await state.get_data()
@@ -102,13 +101,10 @@ async def send_or_edit_transient(message: types.Message, state: FSMContext, text
 
     if old_msg_id:
         try:
-            # Edit the existing menu window seamlessly
             await bot.edit_message_text(chat_id=message.chat.id, message_id=old_msg_id, text=text, reply_markup=reply_markup, parse_mode="Markdown")
             return
-        except Exception:
-            pass # Fails if content is identical or message was manually deleted
+        except Exception: pass
 
-    # Fallback to creating a new UI box if editing failed
     out_msg = await message.answer(text, reply_markup=reply_markup, parse_mode="Markdown")
     await state.update_data(last_transient_msg_id=out_msg.message_id)
 
@@ -238,7 +234,6 @@ async def process_topup_receipt(message: types.Message, state: FSMContext):
         reply_markup=admin_kb.as_markup(), parse_mode="Markdown"
     )
     
-    # We send a fresh confirmation message to break out of the edit loop cleanly
     confirm_msg = await message.answer("⏳ **Receipt uploaded successfully!**\nDispatched to the Admin for manual verification.", reply_markup=inline_back_keyboard(), parse_mode="Markdown")
     await track_ui(confirm_msg, state)
 
@@ -369,13 +364,16 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             await db_execute(supabase.table("activations").insert({"activation_id": act_id, "telegram_id": user_id, "service": service_name, "amount": cost, "phone_number": ph_clean}))
 
             control_kb = InlineKeyboardBuilder()
-            control_kb.row(types.InlineKeyboardButton(text="❌ Cancel", callback_data=f"act_cancel:{act_id}"), types.InlineKeyboardButton(text="⚠️ Report Used", callback_data=f"act_ban:{act_id}"))
+            control_kb.row(
+                types.InlineKeyboardButton(text="❌ Cancel", callback_data=f"act_cancel:{act_id}"), 
+                types.InlineKeyboardButton(text="⚠️ Report Used", callback_data=f"act_ban:{act_id}")
+            )
 
             await status_msg.edit_text(
                 f"📱 **Line Lease Active**\n\n• Platform: `{service_name}`\n• Provider: `{request_operator.upper()}`\n• Phone Number: `{ph_clean}`\n\n⏳ Waiting for verification code to arrive...", 
                 reply_markup=control_kb.as_markup(), parse_mode="Markdown"
             )
-            asyncio.create_task(poll_for_incoming_otp(user_id, act_id, status_msg.message_id, service_name, cost, state))
+            asyncio.create_task(poll_for_incoming_otp(user_id, act_id, status_msg.message_id, service_name, cost, ph_clean, state))
 
         elif "NO_NUMBERS" in resp.text:
             service_meta["stock"] += 1 
@@ -394,7 +392,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
 # ==========================================
 
 async def background_cancel_hero_api(act_id: str):
-    """Silently attempts to cancel the API lease. Waits the required 2 mins if blocked."""
+    """Silently attempts to cancel the API lease. Waits the required 2 mins if blocked by HeroSMS."""
     try:
         resp = await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 8, "id": act_id})
         if "EARLY_CANCEL_DENIED" in resp.text or "CANT_CANCEL" in resp.text or "WAIT_CODE" in resp.text:
@@ -402,7 +400,7 @@ async def background_cancel_hero_api(act_id: str):
             await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 8, "id": act_id})
     except Exception: pass
 
-async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_name: str, cost: float, state: FSMContext):
+async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_name: str, cost: float, phone_num: str, state: FSMContext):
     for _ in range(180):
         await asyncio.sleep(5)
         act_chk = await db_execute(supabase.table("activations").select("status").eq("activation_id", act_id))
@@ -439,7 +437,16 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
                 try: await bot.delete_message(chat_id=user_id, message_id=msg_id)
                 except Exception: pass
 
-                await bot.send_message(chat_id=user_id, text=f"🎉 **OTP Received Successfully!**\n\n📋 **Verification Code:**\n`{raw_token}`\n\nTap the code above to copy it instantly.", parse_mode="Markdown")
+                # ✅ ADDED PHONE NUMBER TO OTP MESSAGE
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=f"🎉 **OTP Received Successfully!**\n\n"
+                         f"📱 **Phone Number:** `{phone_num}`\n"
+                         f"📋 **Verification Code:**\n"
+                         f"`{raw_token}`\n\n"
+                         f"Tap the code above to copy it instantly.",
+                    parse_mode="Markdown"
+                )
                 return
             elif "STATUS_WAIT_CODE" not in resp.text: 
                 break 
@@ -448,7 +455,8 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
 
 @router.callback_query(F.data.startswith("act_"))
 async def cb_lifecycle_mutation(callback: types.CallbackQuery, state: FSMContext):
-    action, act_id, user_id = callback.data.split(":")[0], callback.data.split(":")[1], callback.fromuser.id
+    # Fixed typo: callback.from_user.id
+    action, act_id, user_id = callback.data.split(":")[0], callback.data.split(":")[1], callback.from_user.id
 
     chk = await db_execute(supabase.table("activations").select("*").eq("activation_id", act_id))
     if not chk.data or chk.data[0]["status"] != "pending":
@@ -465,9 +473,10 @@ async def cb_lifecycle_mutation(callback: types.CallbackQuery, state: FSMContext
     await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
     await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": refund_val}))
 
-    await callback.answer("Wallet balance and stock allocation refunded successfully.", show_alert=False)
+    action_text = "cancelled" if action == "act_cancel" else "reported as used & cancelled"
+    await callback.answer("Wallet balance refunded successfully.", show_alert=False)
     await callback.message.edit_text(
-        f"✅ Number `{phone_num}` for service **{service_name}** has been successfully cancelled.\n\n"
+        f"✅ Number `{phone_num}` for service **{service_name}** has been successfully {action_text}.\n\n"
         f"• Value ₱{refund_val:.2f} was restored safely to your internal balance allocation profile.",
         reply_markup=inline_back_keyboard(), parse_mode="Markdown"
     )
@@ -483,7 +492,6 @@ def get_admin_dashboard_markup():
         types.InlineKeyboardButton(text="📥 Recent Top-Ups", callback_data="admin_log_topups"),
         types.InlineKeyboardButton(text="🛒 Recent Sales", callback_data="admin_log_sales")
     )
-    # BRAND NEW: 1-Click Dashboard Toggles for Operators
     for s_name, s_meta in SERVICES_PRICING.items():
         current_op = s_meta.get("operator", "any").upper()
         kb.row(types.InlineKeyboardButton(text=f"⚙️ {s_name} Network: {current_op} 🔄", callback_data=f"adm_cycle_op:{s_name}"))
@@ -532,25 +540,19 @@ async def cb_admin_dashboard_home(callback: types.CallbackQuery, state: FSMConte
     await callback.message.edit_text(stats_text, reply_markup=get_admin_dashboard_markup(), parse_mode="Markdown")
     await callback.answer()
 
-# --- 1-CLICK OPERATOR TOGGLE LOGIC ---
 @router.callback_query(F.data.startswith("adm_cycle_op:"))
 async def cb_admin_cycle_op(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
     s_name = callback.data.split(":")[1]
     
-    # Define the rotation loop
     ops = ["any", "smart", "globe", "tm"]
     current = SERVICES_PRICING[s_name].get("operator", "any")
-    
-    # Calculate the next operator in the list
     next_op = ops[(ops.index(current) + 1) % len(ops)]
     SERVICES_PRICING[s_name]["operator"] = next_op
     
-    # Refresh the menu buttons
     await callback.message.edit_reply_markup(reply_markup=get_admin_dashboard_markup())
     await callback.answer(f"{s_name} provider switched to {next_op.upper()}", show_alert=False)
 
-# --- ADMIN LOGS ---
 @router.callback_query(F.data.startswith("admin_log_"))
 async def cb_admin_logs(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
