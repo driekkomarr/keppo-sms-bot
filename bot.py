@@ -80,6 +80,12 @@ def inline_back_keyboard() -> types.InlineKeyboardMarkup:
     builder.row(types.InlineKeyboardButton(text="🔙 Close Menu", callback_data="menu_main"))
     return builder.as_markup()
 
+def cancel_topup_keyboard() -> types.InlineKeyboardMarkup:
+    """Dedicated cancel button to clear FSM waiting state."""
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="❌ Cancel Top Up", callback_data="cancel_topup"))
+    return builder.as_markup()
+
 def admin_back_keyboard() -> types.InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="🔙 Back to Admin Dashboard", callback_data="admin_dashboard_home"))
@@ -93,14 +99,14 @@ async def cleanup_ui(message: types.Message, state: FSMContext):
     """Safely deletes the user's command and the bot's last temporary window to prevent clutter."""
     try: await message.delete() # Delete the user's text message
     except Exception: pass
-    
+
     session_data = await state.get_data()
     old_msg_id = session_data.get("last_transient_msg_id")
-    
+
     if old_msg_id:
         try: await bot.delete_message(chat_id=message.chat.id, message_id=old_msg_id)
         except Exception: pass
-        
+
 async def track_ui(message: types.Message, state: FSMContext):
     """Saves the ID of the new temporary window so it can be deleted next time."""
     await state.update_data(last_transient_msg_id=message.message_id)
@@ -112,13 +118,13 @@ async def track_ui(message: types.Message, state: FSMContext):
 async def on_startup(bot: Bot):
     global http_client
     http_client = httpx.AsyncClient(timeout=15.0)
-    
+
     user_cmds = [
         types.BotCommand(command="start", description="Open Main Dashboard"),
         types.BotCommand(command="buy_again", description="Re-order Last Service Selection")
     ]
     await bot.set_my_commands(user_cmds, scope=types.BotCommandScopeDefault())
-    
+
     admin_cmds = [
         types.BotCommand(command="start", description="Open Main Dashboard"),
         types.BotCommand(command="admin", description="Open Admin Panel 👑"),
@@ -135,10 +141,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     tg_id = message.from_user.id
     username = message.from_user.username or "Anonymous"
-    
+
     try: await message.delete()
     except Exception: pass
-    
+
     await db_execute(supabase.table("users").upsert({"telegram_id": tg_id, "username": username}, on_conflict="telegram_id"))
     await message.answer("Welcome to OMAR OTP Bot!\n\nUse the menu buttons below to navigate.", reply_markup=main_menu_keyboard())
 
@@ -146,12 +152,12 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def cmd_buy_again(message: types.Message, state: FSMContext):
     await cleanup_ui(message, state)
     tg_id = message.from_user.id
-    
+
     res = await db_execute(supabase.table("activations").select("service").eq("telegram_id", tg_id).order("activation_id", descending=True).limit(1))
     if not res.data:
         err_msg = await message.answer("❌ No previous transaction histories found to clone.", reply_markup=inline_back_keyboard())
         return await track_ui(err_msg, state)
-        
+
     await initiate_number_purchase(message, tg_id, res.data[0]["service"], is_callback=False, state=state)
 
 @router.callback_query(F.data == "menu_main")
@@ -166,7 +172,7 @@ async def menu_balance_text(message: types.Message, state: FSMContext):
     await cleanup_ui(message, state)
     res = await db_execute(supabase.table("users").select("balance").eq("telegram_id", message.from_user.id))
     balance = res.data[0]["balance"] if res.data else 0.00
-    
+
     out_msg = await message.answer(f"💳 **Your Current Account Balance:** ₱{balance:.2f}", reply_markup=inline_back_keyboard(), parse_mode="Markdown")
     await track_ui(out_msg, state)
 
@@ -176,7 +182,7 @@ async def menu_prices_text(message: types.Message, state: FSMContext):
     text = "📋 **Current Platform Pricing Profiles:**\n\n"
     for s_name, s_info in SERVICES_PRICING.items(): 
         text += f"• **{s_name}**: ₱{s_info['price']:.2f}\n"
-        
+
     out_msg = await message.answer(text, reply_markup=inline_back_keyboard(), parse_mode="Markdown")
     await track_ui(out_msg, state)
 
@@ -186,7 +192,7 @@ async def menu_stocks_text(message: types.Message, state: FSMContext):
     text = "📊 **Live Available SIM Pools:**\n\n"
     for s_name, s_info in SERVICES_PRICING.items(): 
         text += f"• **{s_name}**: `{s_info['stock']}` pcs available\n"
-        
+
     out_msg = await message.answer(text, reply_markup=inline_back_keyboard(), parse_mode="Markdown")
     await track_ui(out_msg, state)
 
@@ -201,16 +207,26 @@ async def menu_topup_text(message: types.Message, state: FSMContext):
         "💸 **Manual Balance Realization Route**\n\n"
         "1. Remit your desired amount through GCash to: `09563495650` (Account: OMAR A)\n"
         "2. Save the screenshot of the transaction receipt.\n\n"
-        "📸 **Please upload/send the image of your GCash receipt now:**\n*(Or click Close Menu to cancel)*",
-        reply_markup=inline_back_keyboard(), parse_mode="Markdown"
+        "📸 **Please upload/send the image of your GCash receipt now:**\n*(Or click Cancel below to abort)*",
+        reply_markup=cancel_topup_keyboard(), parse_mode="Markdown"
     )
     await state.set_state(TopUpStates.waiting_for_receipt)
     await track_ui(out_msg, state)
 
+@router.callback_query(F.data == "cancel_topup")
+async def cb_cancel_topup(callback: types.CallbackQuery, state: FSMContext):
+    # Clears the waiting_for_receipt state safely
+    await state.clear() 
+    
+    try: await callback.message.delete()
+    except Exception: pass
+    
+    await callback.answer("Top-up cancelled successfully.", show_alert=False)
+
 @router.message(TopUpStates.waiting_for_receipt, F.text)
 async def reject_text_receipt(message: types.Message, state: FSMContext):
     await cleanup_ui(message, state)
-    err = await message.answer("❌ **Invalid format.** Please upload the actual **image/screenshot** of your receipt.", reply_markup=inline_back_keyboard(), parse_mode="Markdown")
+    err = await message.answer("❌ **Invalid format.** Please upload the actual **image/screenshot** of your receipt.", reply_markup=cancel_topup_keyboard(), parse_mode="Markdown")
     await track_ui(err, state)
 
 @router.message(TopUpStates.waiting_for_receipt, F.photo)
@@ -285,12 +301,12 @@ async def cb_admin_deny(callback: types.CallbackQuery):
 @router.message(F.text == "📞 Buy Numbers")
 async def menu_buy_text(message: types.Message, state: FSMContext):
     await cleanup_ui(message, state)
-    
+
     builder = InlineKeyboardBuilder()
     for s_name, s_meta in SERVICES_PRICING.items():
         builder.row(types.InlineKeyboardButton(text=f"📱 Get {s_name} (₱{s_meta['price']:.2f})", callback_data=f"buy_srv:{s_name}"))
     builder.row(types.InlineKeyboardButton(text="🔙 Close Menu", callback_data="menu_main"))
-    
+
     out_msg = await message.answer("Select target application platform integration context:", reply_markup=builder.as_markup())
     await track_ui(out_msg, state)
 
@@ -325,7 +341,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
 
     service_meta["stock"] -= 1
     text_loading = "⏳ **Allocating secure network line resource... Please wait.**"
-    
+
     if is_callback:
         await msg.edit_text(text_loading, parse_mode="Markdown")
         status_msg = msg
@@ -381,7 +397,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
                 types.InlineKeyboardButton(text="❌ Cancel", callback_data=f"act_cancel:{act_id}"), 
                 types.InlineKeyboardButton(text="⚠️ Report Used", callback_data=f"act_ban:{act_id}")
             )
-            
+
             await status_msg.edit_text(
                 f"📱 **Line Lease Active**\n\n"
                 f"• Platform: `{service_name}`\n"
@@ -423,14 +439,14 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, state: F
             resp = await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "getStatus", "id": act_id})
             if resp.text.startswith("STATUS_OK"):
                 raw_token = resp.text.split(':')[1]
-                
+
                 await db_execute(supabase.table("activations").update({"status": "completed"}).eq("activation_id", act_id))
                 await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 6, "id": act_id})
-                
+
                 # Delete the old "Waiting for verification..." inline box
                 try: await bot.delete_message(chat_id=user_id, message_id=msg_id)
                 except Exception: pass
-                
+
                 # Deliver permanent tap-to-copy isolated message
                 await bot.send_message(
                     chat_id=user_id,
@@ -466,7 +482,7 @@ async def cb_lifecycle_mutation(callback: types.CallbackQuery, state: FSMContext
     await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": refund_val}))
 
     await callback.answer("Wallet balance and stock allocation refunded successfully.")
-    
+
     # Safely edit the existing popup text to show cancellation, no crashes!
     await callback.message.edit_text(
         f"✅ Number `{phone_num}` for service **{service_name}** has been successfully cancelled.\n\n"
@@ -491,7 +507,7 @@ async def generate_admin_stats_text():
     try:
         users_query = await db_execute(supabase.table("users").select("telegram_id"))
         topups_query = await db_execute(supabase.table("topup_logs").select("amount", "created_at"))
-        
+
         total_users = len(users_query.data) if users_query.data else 0
         all_time_total, today_total = 0.00, 0.00
         today_string = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -520,7 +536,7 @@ async def cmd_admin(message: types.Message, state: FSMContext):
     await state.clear()
     try: await message.delete()
     except Exception: pass
-    
+
     stats_text = await generate_admin_stats_text()
     await message.answer(stats_text, reply_markup=get_admin_dashboard_markup(), parse_mode="Markdown")
 
@@ -536,7 +552,7 @@ async def cb_admin_dashboard_home(callback: types.CallbackQuery, state: FSMConte
 async def cb_admin_logs(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
     action = callback.data.split("_")[2]
-    
+
     try:
         if action == "topups":
             res = await db_execute(supabase.table("topup_logs").select("*").limit(10))
@@ -577,10 +593,10 @@ async def process_global_broadcast_blast(message: types.Message, state: FSMConte
     await state.clear()
     try: await message.delete()
     except Exception: pass
-    
+
     progress_msg = await message.answer("⚡ **Retrieving target data rows... Commencing mass dispatch sequence...**")
     users_pool = await db_execute(supabase.table("users").select("telegram_id"))
-    
+
     if not users_pool.data:
         return await progress_msg.edit_text("❌ Broadcast aborted: No registered users found inside database records.", reply_markup=admin_back_keyboard())
 
@@ -594,7 +610,7 @@ async def process_global_broadcast_blast(message: types.Message, state: FSMConte
             await asyncio.sleep(0.05) 
         except TelegramAPIError:
             failure_count += 1
-            
+
     await progress_msg.edit_text(
         "✅ **Global Dispatch Routine Complete**\n\n"
         f"📊 **Summary Ledger Metrics:**\n"
