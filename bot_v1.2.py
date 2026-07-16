@@ -402,4 +402,4 @@ async def background_cancel_hero_api(act_id: str):
             await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 8, "id": act_id})
     except Exception: pass
 
-async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, s
+async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_name: str, cost: float, phone_num: str, state: FSMContext):
