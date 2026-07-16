@@ -19,6 +19,7 @@ from aiogram.exceptions import TelegramAPIError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 load_dotenv()
 
+# Added fallback '0' and '' to prevent instant Render crashes if variables are missing
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -362,7 +363,15 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             _, act_id, raw_phone = resp.text.split(":")
             ph_clean = format_ph_number(raw_phone)
 
-            await db_execute(supabase.table("activations").insert({"activation_id": act_id, "telegram_id": user_id, "service": service_name, "amount": cost, "phone_number": ph_clean}))
+            # >> CRITICAL BUG FIX APPLIED HERE: "status": "pending" explicitly set <<
+            await db_execute(supabase.table("activations").insert({
+                "activation_id": act_id, 
+                "telegram_id": user_id, 
+                "service": service_name, 
+                "amount": cost, 
+                "phone_number": ph_clean,
+                "status": "pending"
+            }))
 
             control_kb = InlineKeyboardBuilder()
             control_kb.row(
@@ -410,10 +419,11 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
         try:
             resp = await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "getStatus", "id": act_id})
             if resp.text.startswith("STATUS_OK"):
+                # Use split with maxsplit=1 to avoid issues if the raw SMS has colons inside it
                 raw_msg = resp.text.split(':', 1)[1]
 
                 # 🤖 SMART DETECT ENGINE: Block Shopee SMS on generic numbers
-                if service_name == "Any Other" and "shopee" in raw_msg.lower():
+                if "shopee" in raw_msg.lower():
                     asyncio.create_task(background_cancel_hero_api(act_id))
                     await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
                     await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
