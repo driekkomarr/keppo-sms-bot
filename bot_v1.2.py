@@ -19,7 +19,6 @@ from aiogram.exceptions import TelegramAPIError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 load_dotenv()
 
-# Added fallback '0' and '' to prevent instant Render crashes if variables are missing
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -403,3 +402,301 @@ async def background_cancel_hero_api(act_id: str):
     except Exception: pass
 
 async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_name: str, cost: float, phone_num: str, state: FSMContext):
+    for _ in range(180):
+        await asyncio.sleep(5)
+        act_chk = await db_execute(supabase.table("activations").select("status").eq("activation_id", act_id))
+        if not act_chk.data or act_chk.data[0]["status"] != "pending": return 
+
+        try:
+            resp = await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "getStatus", "id": act_id})
+            if resp.text.startswith("STATUS_OK"):
+                raw_msg = resp.text.split(':', 1)[1]
+
+                # 🤖 SMART DETECT ENGINE: Block Shopee SMS on generic numbers
+                if service_name == "Any Other" and "shopee" in raw_msg.lower():
+                    asyncio.create_task(background_cancel_hero_api(act_id))
+                    await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
+                    await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
+                    SERVICES_PRICING[service_name]["stock"] += 1
+                    
+                    try: await bot.delete_message(chat_id=user_id, message_id=msg_id)
+                    except Exception: pass
+
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=f"🤖 **Smart Detect Activated!**\n\n"
+                             f"⚠️ The network routed a Shopee OTP to this number. Because Shopee actively bans generic numbers, we have auto-blocked this line to protect your account.\n\n"
+                             f"💰 **We instantly refunded your ₱{cost:.2f}.** Please try leasing a new number.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                # Normal Successful OTP Process - Extract the exact integer verification code
+                code_matches = re.findall(r'\b\d{4,8}\b', raw_msg)
+                verification_code = code_matches[0] if code_matches else "Code not found"
+                
+                # Fetch Current Philippine Time (UTC+8)
+                ph_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%B %d, %Y - %I:%M %p (PHT)")
+
+                # Mark as OTP received so we know it is waiting for user action (Extend or Close)
+                await db_execute(supabase.table("activations").update({"status": "otp_received"}).eq("activation_id", act_id))
+
+                try: await bot.delete_message(chat_id=user_id, message_id=msg_id)
+                except Exception: pass
+
+                # Build Extension Control Keyboard
+                ext_kb = InlineKeyboardBuilder()
+                ext_kb.row(types.InlineKeyboardButton(text="🔁 Receive Another SMS", callback_data=f"act_extend:{act_id}"))
+                ext_kb.row(types.InlineKeyboardButton(text="✅ Close & Finish", callback_data=f"act_finish:{act_id}"))
+
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=f"🎉 **OTP Received Successfully!**\n\n"
+                         f"📱 **Phone Number:** `{phone_num}`\n"
+                         f"📋 **Verification Code:**\n"
+                         f"`{verification_code}`\n\n"
+                         f"📝 **Raw Message:**\n"
+                         f"{raw_msg}\n\n"
+                         f"🕒 **Date and Time:**\n{ph_time}\n\n"
+                         f"Tap the code above to copy it instantly.",
+                    reply_markup=ext_kb.as_markup(),
+                    parse_mode="Markdown"
+                )
+                return
+            elif "STATUS_WAIT_CODE" not in resp.text: 
+                break 
+        except Exception: 
+            pass
+
+@router.callback_query(F.data.startswith("act_"))
+async def cb_lifecycle_mutation(callback: types.CallbackQuery, state: FSMContext):
+    action, act_id = callback.data.split(":")[0], callback.data.split(":")[1]
+    user_id = callback.from_user.id
+
+    chk = await db_execute(supabase.table("activations").select("*").eq("activation_id", act_id))
+    if not chk.data:
+        return await callback.answer("❌ This lease context is no longer active.", show_alert=True)
+
+    act_data = chk.data[0]
+    db_status = act_data["status"]
+    refund_val = float(act_data["amount"])
+    service_name = act_data["service"]
+    phone_num = act_data["phone_number"]
+
+    # 1. HANDLING STANDARD CANCELLATION (BEFORE OTP ARRIVES)
+    if action in ["act_cancel", "act_ban"]:
+        if db_status != "pending":
+            return await callback.answer("❌ This lease cannot be cancelled now.", show_alert=True)
+
+        if service_name in SERVICES_PRICING: SERVICES_PRICING[service_name]["stock"] += 1
+
+        asyncio.create_task(background_cancel_hero_api(act_id))
+        await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
+        await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": refund_val}))
+
+        action_text = "cancelled" if action == "act_cancel" else "reported as used & cancelled"
+        await callback.answer("Wallet balance refunded successfully.", show_alert=False)
+        await callback.message.edit_text(
+            f"✅ Number `{phone_num}` for service **{service_name}** has been successfully {action_text}.\n\n"
+            f"• Value ₱{refund_val:.2f} was restored safely to your internal balance allocation profile.",
+            reply_markup=inline_back_keyboard(), parse_mode="Markdown"
+        )
+        return
+
+    # 2. HANDLING EXTENSION TRIGGER
+    elif action == "act_extend":
+        if db_status != "otp_received":
+            return await callback.answer("❌ Cannot extend at this state.", show_alert=True)
+        
+        # Tell API to wait for another SMS (status=3) and revert DB to pending
+        await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 3, "id": act_id})
+        await db_execute(supabase.table("activations").update({"status": "pending"}).eq("activation_id", act_id))
+        
+        kb = InlineKeyboardBuilder()
+        kb.row(types.InlineKeyboardButton(text="❌ Cancel Extend", callback_data=f"act_cancelextend:{act_id}"))
+        
+        msg = await callback.message.edit_text(
+            f"📱 **Line Lease Extended**\n\n"
+            f"• Platform: `{service_name}`\n"
+            f"• Phone Number: `{phone_num}`\n\n"
+            f"⏳ Waiting for the **next** verification code to arrive...", 
+            reply_markup=kb.as_markup(), parse_mode="Markdown"
+        )
+        
+        # Relaunch the polling loop for the new SMS
+        asyncio.create_task(poll_for_incoming_otp(user_id, act_id, msg.message_id, service_name, refund_val, phone_num, state))
+        await callback.answer("⏳ Number extended. Waiting for next SMS...")
+        return
+
+    # 3. HANDLING FINISH OR CANCEL EXTEND (AFTER AN OTP WAS ALREADY RECEIVED)
+    elif action in ["act_finish", "act_cancelextend"]:
+        # Send status 6 to API to close the line completely
+        await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 6, "id": act_id})
+        await db_execute(supabase.table("activations").update({"status": "completed"}).eq("activation_id", act_id))
+        
+        # Remove buttons from the message cleanly without deleting history
+        if action == "act_cancelextend":
+            await callback.message.edit_text(f"✅ Extension cancelled. Line `{phone_num}` is now securely closed.")
+        else:
+            await callback.message.edit_reply_markup(reply_markup=None)
+            
+        await callback.answer("✅ Line closed successfully.")
+        return
+
+# ==========================================
+# 👑 EXCLUSIVE ADMINISTRATION SUITE
+# ==========================================
+
+def get_admin_dashboard_markup():
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="📢 Send Announcement Blast", callback_data="admin_trigger_broadcast"))
+    kb.row(
+        types.InlineKeyboardButton(text="📥 Recent Top-Ups", callback_data="admin_log_topups"),
+        types.InlineKeyboardButton(text="🛒 Recent Sales", callback_data="admin_log_sales")
+    )
+    for s_name, s_meta in SERVICES_PRICING.items():
+        current_op = s_meta.get("operator", "any").upper()
+        kb.row(types.InlineKeyboardButton(text=f"⚙️ {s_name} Network: {current_op} 🔄", callback_data=f"adm_cycle_op:{s_name}"))
+    return kb.as_markup()
+
+async def generate_admin_stats_text():
+    try:
+        users_query = await db_execute(supabase.table("users").select("telegram_id"))
+        topups_query = await db_execute(supabase.table("topup_logs").select("amount", "created_at"))
+
+        total_users = len(users_query.data) if users_query.data else 0
+        all_time_total, today_total = 0.00, 0.00
+        today_string = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        if topups_query.data:
+            for row in topups_query.data:
+                amt = float(row["amount"])
+                all_time_total += amt
+                if row.get("created_at", "").startswith(today_string): today_total += amt
+
+        return (
+            "👑 **TeleBOT System Administrator Console**\n\n"
+            f"📊 **Live Revenue Dashboard:**\n"
+            f"• **Today's Gross Top-Ups:** ₱`{today_total:.2f}`\n"
+            f"• **All-Time Gross Top-Ups:** ₱`{all_time_total:.2f}`\n"
+            f"• **Total Registered Users:** `{total_users}`\n\n"
+            "Choose an administrative action below:"
+        )
+    except Exception as e: return f"👑 **Admin Console Error**\n⚠️ DB Error: `{e}`"
+
+@router.message(Command("admin"))
+async def cmd_admin(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return 
+    await state.clear()
+    try: await message.delete()
+    except Exception: pass
+
+    stats_text = await generate_admin_stats_text()
+    await message.answer(stats_text, reply_markup=get_admin_dashboard_markup(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "admin_dashboard_home")
+async def cb_admin_dashboard_home(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await state.clear()
+    stats_text = await generate_admin_stats_text()
+    await callback.message.edit_text(stats_text, reply_markup=get_admin_dashboard_markup(), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("adm_cycle_op:"))
+async def cb_admin_cycle_op(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
+    s_name = callback.data.split(":")[1]
+    
+    ops = ["any", "smart", "globe", "tm"]
+    current = SERVICES_PRICING[s_name].get("operator", "any")
+    next_op = ops[(ops.index(current) + 1) % len(ops)]
+    SERVICES_PRICING[s_name]["operator"] = next_op
+    
+    await callback.message.edit_reply_markup(reply_markup=get_admin_dashboard_markup())
+    await callback.answer(f"{s_name} provider switched to {next_op.upper()}", show_alert=False)
+
+@router.callback_query(F.data.startswith("admin_log_"))
+async def cb_admin_logs(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
+    action = callback.data.split("_")[2]
+
+    try:
+        if action == "topups":
+            res = await db_execute(supabase.table("topup_logs").select("*").limit(10))
+            text = "📥 **Latest Approved Wallet Injections:**\n\n"
+            if not res.data: text += "No top-ups recorded yet."
+            else:
+                for row in reversed(res.data): 
+                    date_str = str(row.get('created_at', 'Unknown'))[:10] if row.get('created_at') else 'N/A'
+                    text += f"• **User:** `{row.get('telegram_id', 'Unknown')}` | **₱{row.get('amount', 0)}** | {date_str}\n"
+        elif action == "sales":
+            res = await db_execute(supabase.table("activations").select("*").eq("status", "completed").limit(10))
+            text = "🛒 **Latest Completed OTP Dispatches:**\n\n"
+            if not res.data: text += "No completed sales yet."
+            else:
+                for row in reversed(res.data): 
+                    text += f"• **{row.get('service', 'Service')}** | Cost: ₱{row.get('amount', 0)} | **User:** `{row.get('telegram_id', 'Unknown')}`\n"
+        await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+    except Exception as e:
+        await callback.message.edit_text(f"⚠️ **Database Error Detected:**\n`{str(e)}`", reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+    finally:
+        await callback.answer()
+
+@router.callback_query(F.data == "admin_trigger_broadcast")
+async def cb_admin_trigger_broadcast(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.message.edit_text("📢 **Global Announcement Engine**\n\nType and send the message text you wish to blast out to **all** users.", reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+    await state.set_state(AdminStates.waiting_for_broadcast)
+    await callback.answer()
+
+@router.message(AdminStates.waiting_for_broadcast)
+async def process_global_broadcast_blast(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    broadcast_text = message.text
+    await state.clear()
+    try: await message.delete()
+    except Exception: pass
+
+    progress_msg = await message.answer("⚡ **Retrieving target data rows... Commencing mass dispatch sequence...**")
+    users_pool = await db_execute(supabase.table("users").select("telegram_id"))
+
+    if not users_pool.data: return await progress_msg.edit_text("❌ Broadcast aborted: No registered users found inside database records.", reply_markup=admin_back_keyboard())
+
+    success_count, failure_count = 0, 0
+    for user in users_pool.data:
+        target_chat_id = user["telegram_id"]
+        if target_chat_id == ADMIN_ID: continue
+        try:
+            await bot.send_message(chat_id=target_chat_id, text=broadcast_text, parse_mode="Markdown")
+            success_count += 1
+            await asyncio.sleep(0.05) 
+        except TelegramAPIError: failure_count += 1
+
+    await progress_msg.edit_text(
+        "✅ **Global Dispatch Routine Complete**\n\n"
+        f"📊 **Summary Ledger Metrics:**\n"
+        f"• **Successfully Delivered:** `{success_count}` accounts\n"
+        f"• **Delivery Drops/Blocked:** `{failure_count}` accounts",
+        reply_markup=admin_back_keyboard(), parse_mode="Markdown"
+    )
+
+# ==========================================
+# 🌍 HEALTH CHECK WORKER TERMINAL
+# ==========================================
+
+def run_health_check_server():
+    class HealthCheckHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Bot operational.")
+        def log_message(self, format, *args): return 
+    port = int(os.getenv("PORT", 8080))
+    HTTPServer(("0.0.0.0", port), HealthCheckHandler).serve_forever()
+
+if __name__ == "__main__":
+    threading.Thread(target=run_health_check_server, daemon=True).start()
+    dp.include_router(router)
+    dp.startup.register(on_startup)
+    asyncio.run(dp.start_polling(bot))
