@@ -33,7 +33,7 @@ USD_TO_PHP_RATE = 60.50
 SERVICES_PRICING = {
     "Shopee": {"code": "ds", "price": 1500.00, "stock": 50, "operator": "any"},     
     "GCash": {"code": "ot", "price": 1000.00, "stock": 50, "operator": "any"},      
-    "Any Other": {"code": "ot", "price": 5000.00, "stock": 50, "operator": "any"}   
+    "Any Other": {"code": "ot", "price": 5.00, "stock": 50, "operator": "any"}   
 }
 
 # --- INITIALIZE CORE CLIENTS ---
