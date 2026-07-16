@@ -19,12 +19,13 @@ from aiogram.exceptions import TelegramAPIError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-HERO_SMS_KEY = os.getenv("HERO_SMS_API_KEY")
-HERO_SMS_URL = os.getenv("HERO_SMS_BASE_URL")
+# Added fallback '0' and '' to prevent instant Render crashes if variables are missing
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+HERO_SMS_KEY = os.getenv("HERO_SMS_API_KEY", "")
+HERO_SMS_URL = os.getenv("HERO_SMS_BASE_URL", "https://hero-sms.com/stubs/handler_api.php")
 
 # --- GLOBAL CONFIGURATION METRICS ---
 PH_COUNTRY_ID = 4 
@@ -153,7 +154,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def cmd_buy_again(message: types.Message, state: FSMContext):
     tg_id = message.from_user.id
     res = await db_execute(supabase.table("activations").select("service").eq("telegram_id", tg_id).order("activation_id", descending=True).limit(1))
-    
+
     if not res.data:
         await send_or_edit_transient(message, state, "❌ No previous transaction histories found to clone.", inline_back_keyboard())
         return
@@ -234,7 +235,7 @@ async def process_topup_receipt(message: types.Message, state: FSMContext):
         caption=f"🚨 **Inbound Top-Up Receipt for Audit**\n\n• **User ID:** `{user_id}`\n• **Username:** @{username}\n\nPlease review the attached receipt.",
         reply_markup=admin_kb.as_markup(), parse_mode="Markdown"
     )
-    
+
     confirm_msg = await message.answer("⏳ **Receipt uploaded successfully!**\nDispatched to the Admin for manual verification.", reply_markup=inline_back_keyboard(), parse_mode="Markdown")
     await track_ui(confirm_msg, state)
 
@@ -288,7 +289,7 @@ async def menu_buy_text(message: types.Message, state: FSMContext):
     for s_name, s_meta in SERVICES_PRICING.items():
         builder.row(types.InlineKeyboardButton(text=f"📱 Get {s_name} (₱{s_meta['price']:.2f})", callback_data=f"buy_srv:{s_name}"))
     builder.row(types.InlineKeyboardButton(text="🔙 Close Menu", callback_data="menu_main"))
-    
+
     await send_or_edit_transient(message, state, "Select target application platform integration context:", builder.as_markup())
 
 @router.callback_query(F.data.startswith("buy_srv:"))
@@ -401,7 +402,4 @@ async def background_cancel_hero_api(act_id: str):
             await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 8, "id": act_id})
     except Exception: pass
 
-async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_name: str, cost: float, phone_num: str, state: FSMContext):
-    for _ in range(180):
-        await asyncio.sleep(5)
-        act_chk = a
+async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, s
