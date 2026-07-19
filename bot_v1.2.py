@@ -3,7 +3,6 @@ import asyncio
 import httpx
 import threading
 import logging
-import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -19,7 +18,6 @@ from aiogram.exceptions import TelegramAPIError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 load_dotenv()
 
-# Added fallback '0' and '' to prevent instant Render crashes if variables are missing
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -33,9 +31,9 @@ USD_TO_PHP_RATE = 60.50
 
 # --- PRICING, STOCKS & OPERATOR PROFILES ---
 SERVICES_PRICING = {
-    "Tara777": {"code": "ot", "price": 5.00, "stock": 50, "operator": "any"},     
-    "Phbingo": {"code": "ot", "price": 5.00, "stock": 50, "operator": "any"},      
-    "Pharchade": {"code": "ot", "price": 5.00, "stock": 50, "operator": "any"}   
+    "Any Other": {"code": "ot", "price": 5.00, "stock": 50, "operator": "any"},     
+    "GCash": {"code": "ot", "price": 5.00, "stock": 50, "operator": "any"},      
+    "Shopee": {"code": "sh", "price": 5.00, "stock": 50, "operator": "any"}   
 }
 
 # --- INITIALIZE CORE CLIENTS ---
@@ -363,15 +361,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             _, act_id, raw_phone = resp.text.split(":")
             ph_clean = format_ph_number(raw_phone)
 
-            # >> CRITICAL BUG FIX APPLIED HERE: "status": "pending" explicitly set <<
-            await db_execute(supabase.table("activations").insert({
-                "activation_id": act_id, 
-                "telegram_id": user_id, 
-                "service": service_name, 
-                "amount": cost, 
-                "phone_number": ph_clean,
-                "status": "pending"
-            }))
+            await db_execute(supabase.table("activations").insert({"activation_id": act_id, "telegram_id": user_id, "service": service_name, "amount": cost, "phone_number": ph_clean, "status": "pending"}))
 
             control_kb = InlineKeyboardBuilder()
             control_kb.row(
@@ -419,11 +409,10 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
         try:
             resp = await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "getStatus", "id": act_id})
             if resp.text.startswith("STATUS_OK"):
-                # Use split with maxsplit=1 to avoid issues if the raw SMS has colons inside it
                 raw_msg = resp.text.split(':', 1)[1]
 
                 # 🤖 SMART DETECT ENGINE: Block Shopee SMS on generic numbers
-                if "shopee" in raw_msg.lower():
+                if service_name == "Any Other" and "shopee" in raw_msg.lower():
                     asyncio.create_task(background_cancel_hero_api(act_id))
                     await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
                     await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
@@ -441,35 +430,22 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
                     )
                     return
 
-                # Normal Successful OTP Process - Extract the exact integer verification code
-                code_matches = re.findall(r'\b\d{4,8}\b', raw_msg)
-                verification_code = code_matches[0] if code_matches else "Code not found"
-                
-                # Fetch Current Philippine Time (UTC+8)
+                # Normal Successful OTP Process (No new features)
                 ph_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%B %d, %Y - %I:%M %p (PHT)")
 
-                # Mark as OTP received so we know it is waiting for user action (Extend or Close)
-                await db_execute(supabase.table("activations").update({"status": "otp_received"}).eq("activation_id", act_id))
+                await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 6, "id": act_id})
+                await db_execute(supabase.table("activations").update({"status": "completed"}).eq("activation_id", act_id))
 
                 try: await bot.delete_message(chat_id=user_id, message_id=msg_id)
                 except Exception: pass
-
-                # Build Extension Control Keyboard
-                ext_kb = InlineKeyboardBuilder()
-                ext_kb.row(types.InlineKeyboardButton(text="🔁 Receive Another SMS", callback_data=f"act_extend:{act_id}"))
-                ext_kb.row(types.InlineKeyboardButton(text="✅ Close & Finish", callback_data=f"act_finish:{act_id}"))
 
                 await bot.send_message(
                     chat_id=user_id,
                     text=f"🎉 **OTP Received Successfully!**\n\n"
                          f"📱 **Phone Number:** `{phone_num}`\n"
-                         f"📋 **Verification Code:**\n"
-                         f"`{verification_code}`\n\n"
-                         f"📝 **Raw Message:**\n"
-                         f"{raw_msg}\n\n"
-                         f"🕒 **Date and Time:**\n{ph_time}\n\n"
-                         f"Tap the code above to copy it instantly.",
-                    reply_markup=ext_kb.as_markup(),
+                         f"📝 **Message:**\n"
+                         f"`{raw_msg}`\n\n"
+                         f"🕒 **Date and Time:**\n{ph_time}",
                     parse_mode="Markdown"
                 )
                 return
@@ -493,7 +469,7 @@ async def cb_lifecycle_mutation(callback: types.CallbackQuery, state: FSMContext
     service_name = act_data["service"]
     phone_num = act_data["phone_number"]
 
-    # 1. HANDLING STANDARD CANCELLATION (BEFORE OTP ARRIVES)
+    # ONLY handling original cancel/ban logic (No extension logic)
     if action in ["act_cancel", "act_ban"]:
         if db_status != "pending":
             return await callback.answer("❌ This lease cannot be cancelled now.", show_alert=True)
@@ -511,46 +487,6 @@ async def cb_lifecycle_mutation(callback: types.CallbackQuery, state: FSMContext
             f"• Value ₱{refund_val:.2f} was restored safely to your internal balance allocation profile.",
             reply_markup=inline_back_keyboard(), parse_mode="Markdown"
         )
-        return
-
-    # 2. HANDLING EXTENSION TRIGGER
-    elif action == "act_extend":
-        if db_status != "otp_received":
-            return await callback.answer("❌ Cannot extend at this state.", show_alert=True)
-        
-        # Tell API to wait for another SMS (status=3) and revert DB to pending
-        await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 3, "id": act_id})
-        await db_execute(supabase.table("activations").update({"status": "pending"}).eq("activation_id", act_id))
-        
-        kb = InlineKeyboardBuilder()
-        kb.row(types.InlineKeyboardButton(text="❌ Cancel Extend", callback_data=f"act_cancelextend:{act_id}"))
-        
-        msg = await callback.message.edit_text(
-            f"📱 **Line Lease Extended**\n\n"
-            f"• Platform: `{service_name}`\n"
-            f"• Phone Number: `{phone_num}`\n\n"
-            f"⏳ Waiting for the **next** verification code to arrive...", 
-            reply_markup=kb.as_markup(), parse_mode="Markdown"
-        )
-        
-        # Relaunch the polling loop for the new SMS
-        asyncio.create_task(poll_for_incoming_otp(user_id, act_id, msg.message_id, service_name, refund_val, phone_num, state))
-        await callback.answer("⏳ Number extended. Waiting for next SMS...")
-        return
-
-    # 3. HANDLING FINISH OR CANCEL EXTEND (AFTER AN OTP WAS ALREADY RECEIVED)
-    elif action in ["act_finish", "act_cancelextend"]:
-        # Send status 6 to API to close the line completely
-        await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 6, "id": act_id})
-        await db_execute(supabase.table("activations").update({"status": "completed"}).eq("activation_id", act_id))
-        
-        # Remove buttons from the message cleanly without deleting history
-        if action == "act_cancelextend":
-            await callback.message.edit_text(f"✅ Extension cancelled. Line `{phone_num}` is now securely closed.")
-        else:
-            await callback.message.edit_reply_markup(reply_markup=None)
-            
-        await callback.answer("✅ Line closed successfully.")
         return
 
 # ==========================================
