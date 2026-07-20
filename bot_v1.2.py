@@ -32,9 +32,8 @@ USD_TO_PHP_RATE = 60.50
 
 # --- PRICING, STOCKS & OPERATOR PROFILES ---
 SERVICES_PRICING = {
-    "Any Other": {"code": "ot", "price": 5.00, "stock": 50, "operator": "any"},     
-    "GCash": {"code": "ot", "price": 5.00, "stock": 50, "operator": "any"},      
-    "Shopee": {"code": "sh", "price": 5.00, "stock": 50, "operator": "any"}   
+    "PHBINGO": {"code": "ot", "price": 5.00, "stock": 100, "operator": "any"},     
+    "TARA 777": {"code": "ot", "price": 5.00, "stock": 100, "operator": "any"}  
 }
 
 # --- INITIALIZE CORE CLIENTS ---
