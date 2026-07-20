@@ -446,7 +446,7 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
                 await bot.send_message(
                     chat_id=user_id,
                     text=f"🎉 **OTP Received Successfully!**\n\n"
-                         f"📱 **Phone Number:** `{phone_num}`\n"
+                         f"📱 **Phone Number:** `{phone_num}`\n\n"
                          f"📋 **Code:** `{verification_code}`\n\n"
                          f"📝 **Raw Message:**\n"
                          f"`{raw_msg}`\n\n"
