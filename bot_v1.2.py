@@ -3,6 +3,7 @@ import asyncio
 import httpx
 import threading
 import logging
+import re  # <-- Added required import for Regex code extraction
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -430,7 +431,11 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
                     )
                     return
 
-                # Normal Successful OTP Process (No new features)
+                # Normal Successful OTP Process with Regex Code Extraction
+                # Finds an isolated sequence of 4 to 8 digits
+                code_matches = re.findall(r'\b\d{4,8}\b', raw_msg)
+                verification_code = code_matches[0] if code_matches else "Code not found"
+
                 ph_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%B %d, %Y - %I:%M %p (PHT)")
 
                 await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "setStatus", "status": 6, "id": act_id})
@@ -443,7 +448,8 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
                     chat_id=user_id,
                     text=f"🎉 **OTP Received Successfully!**\n\n"
                          f"📱 **Phone Number:** `{phone_num}`\n"
-                         f"📝 **Message:**\n"
+                         f"📋 **Code:** `{verification_code}`\n\n"
+                         f"📝 **Raw Message:**\n"
                          f"`{raw_msg}`\n\n"
                          f"🕒 **Date and Time:**\n{ph_time}",
                     parse_mode="Markdown"
