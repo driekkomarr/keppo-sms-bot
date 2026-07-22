@@ -370,7 +370,7 @@ async def initiate_number_purchase(msg: types.Message, user_id: int, service_nam
             )
 
             await status_msg.edit_text(
-                f"📱 **Line Lease Active**\n\n• Platform: `{service_name}`\n• Provider: `{request_operator.upper()}`\n• Phone Number: `{ph_clean}`\n\n⏳ Waiting for verification code to arrive...", 
+                f"📱 **Line Lease Active**\n\n• Platform: `{service_name}`\n• Provider: `{request_operator.upper()}`\n• Phone Number: `{ph_clean}`\n\n⏳ Waiting for verification code to arrive... (**120s remaining**)", 
                 reply_markup=control_kb.as_markup(), parse_mode="Markdown"
             )
             asyncio.create_task(poll_for_incoming_otp(user_id, act_id, status_msg.message_id, service_name, cost, ph_clean, state))
@@ -401,10 +401,17 @@ async def background_cancel_hero_api(act_id: str):
     except Exception: pass
 
 async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_name: str, cost: float, phone_num: str, state: FSMContext):
-    for _ in range(180):
-        await asyncio.sleep(5)
+    max_seconds = 120  # 2 minutes total wait time
+    sleep_interval = 5
+    iterations = max_seconds // sleep_interval
+
+    for i in range(iterations):
+        await asyncio.sleep(sleep_interval)
+        
+        # 1. Check if user already clicked the manual Cancel button
         act_chk = await db_execute(supabase.table("activations").select("status").eq("activation_id", act_id))
-        if not act_chk.data or act_chk.data[0]["status"] != "pending": return 
+        if not act_chk.data or act_chk.data[0]["status"] != "pending": 
+            return # Stop the background loop immediately to prevent double refunds
 
         try:
             resp = await http_client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "getStatus", "id": act_id})
@@ -416,7 +423,7 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
                     asyncio.create_task(background_cancel_hero_api(act_id))
                     await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
                     await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
-                    SERVICES_PRICING[service_name]["stock"] += 1
+                    if service_name in SERVICES_PRICING: SERVICES_PRICING[service_name]["stock"] += 1
                     
                     try: await bot.delete_message(chat_id=user_id, message_id=msg_id)
                     except Exception: pass
@@ -454,8 +461,47 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
                     parse_mode="Markdown"
                 )
                 return
-            elif "STATUS_WAIT_CODE" not in resp.text: 
-                break 
+            elif "STATUS_WAIT_CODE" in resp.text: 
+                # 🕒 Update the countdown timer on the UI every 15 seconds to avoid Telegram Rate Limits
+                if i > 0 and i % 3 == 0:
+                    time_left = max_seconds - (i * sleep_interval)
+                    control_kb = InlineKeyboardBuilder()
+                    control_kb.row(
+                        types.InlineKeyboardButton(text="❌ Cancel", callback_data=f"act_cancel:{act_id}"), 
+                        types.InlineKeyboardButton(text="⚠️ Report Used", callback_data=f"act_ban:{act_id}")
+                    )
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=user_id,
+                            message_id=msg_id,
+                            text=f"📱 **Line Lease Active**\n\n• Platform: `{service_name}`\n• Phone Number: `{phone_num}`\n\n⏳ Waiting for code... (**{time_left}s remaining**)",
+                            reply_markup=control_kb.as_markup(),
+                            parse_mode="Markdown"
+                        )
+                    except Exception: 
+                        pass # Ignore errors if message text is identical or was deleted
+        except Exception: 
+            pass
+
+    # 🛑 AUTO-CANCEL: If the loop finishes 120 seconds and no OTP was found
+    final_chk = await db_execute(supabase.table("activations").select("status").eq("activation_id", act_id))
+    if final_chk.data and final_chk.data[0]["status"] == "pending":
+        
+        # Restore stock and refund
+        if service_name in SERVICES_PRICING: SERVICES_PRICING[service_name]["stock"] += 1
+        
+        asyncio.create_task(background_cancel_hero_api(act_id))
+        await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
+        await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
+        
+        try:
+            await bot.edit_message_text(
+                chat_id=user_id,
+                message_id=msg_id,
+                text=f"⏰ **Timeout!**\n\nNo OTP was received within 2 minutes for `{phone_num}`. The lease has been automatically cancelled.\n\n💰 **₱{cost:.2f} has been refunded to your wallet.**",
+                reply_markup=inline_back_keyboard(),
+                parse_mode="Markdown"
+            )
         except Exception: 
             pass
 
@@ -557,12 +603,12 @@ async def cb_admin_dashboard_home(callback: types.CallbackQuery, state: FSMConte
 async def cb_admin_cycle_op(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
     s_name = callback.data.split(":")[1]
-    
+
     ops = ["any", "smart", "globe", "tm"]
     current = SERVICES_PRICING[s_name].get("operator", "any")
     next_op = ops[(ops.index(current) + 1) % len(ops)]
     SERVICES_PRICING[s_name]["operator"] = next_op
-    
+
     await callback.message.edit_reply_markup(reply_markup=get_admin_dashboard_markup())
     await callback.answer(f"{s_name} provider switched to {next_op.upper()}", show_alert=False)
 
