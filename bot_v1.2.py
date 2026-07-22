@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import threading
 import logging
-import re  # <-- Added required import for Regex code extraction
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -50,6 +50,7 @@ class TopUpStates(StatesGroup):
 class AdminStates(StatesGroup):
     waiting_for_approved_amount = State()
     waiting_for_broadcast = State()
+    waiting_for_new_price = State() # NEW: State for dynamically updating prices
 
 # --- NON-BLOCKING DATABASE WORKER ---
 async def db_execute(query_chain):
@@ -407,7 +408,7 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
 
     for i in range(iterations):
         await asyncio.sleep(sleep_interval)
-        
+
         # 1. Check if user already clicked the manual Cancel button
         act_chk = await db_execute(supabase.table("activations").select("status").eq("activation_id", act_id))
         if not act_chk.data or act_chk.data[0]["status"] != "pending": 
@@ -424,7 +425,7 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
                     await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
                     await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
                     if service_name in SERVICES_PRICING: SERVICES_PRICING[service_name]["stock"] += 1
-                    
+
                     try: await bot.delete_message(chat_id=user_id, message_id=msg_id)
                     except Exception: pass
 
@@ -486,14 +487,14 @@ async def poll_for_incoming_otp(user_id: int, act_id: str, msg_id: int, service_
     # 🛑 AUTO-CANCEL: If the loop finishes 120 seconds and no OTP was found
     final_chk = await db_execute(supabase.table("activations").select("status").eq("activation_id", act_id))
     if final_chk.data and final_chk.data[0]["status"] == "pending":
-        
+
         # Restore stock and refund
         if service_name in SERVICES_PRICING: SERVICES_PRICING[service_name]["stock"] += 1
-        
+
         asyncio.create_task(background_cancel_hero_api(act_id))
         await db_execute(supabase.table("activations").update({"status": "cancelled"}).eq("activation_id", act_id))
         await db_execute(supabase.rpc("refund_balance", {"user_id": user_id, "refund_amount": cost}))
-        
+
         try:
             await bot.edit_message_text(
                 chat_id=user_id,
@@ -553,7 +554,13 @@ def get_admin_dashboard_markup():
     )
     for s_name, s_meta in SERVICES_PRICING.items():
         current_op = s_meta.get("operator", "any").upper()
+        current_price = s_meta.get("price", 0.00)
+        
+        # Row 1: Network Operator Cycle
         kb.row(types.InlineKeyboardButton(text=f"⚙️ {s_name} Network: {current_op} 🔄", callback_data=f"adm_cycle_op:{s_name}"))
+        # Row 2: Price Adjustment Tool
+        kb.row(types.InlineKeyboardButton(text=f"💰 Adjust {s_name} Price (Current: ₱{current_price:.2f})", callback_data=f"adm_price:{s_name}"))
+        
     return kb.as_markup()
 
 async def generate_admin_stats_text():
@@ -611,6 +618,51 @@ async def cb_admin_cycle_op(callback: types.CallbackQuery):
 
     await callback.message.edit_reply_markup(reply_markup=get_admin_dashboard_markup())
     await callback.answer(f"{s_name} provider switched to {next_op.upper()}", show_alert=False)
+
+# --- DYNAMIC PRICE ADJUSTMENT ENGINE ---
+@router.callback_query(F.data.startswith("adm_price:"))
+async def cb_admin_edit_price(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    s_name = callback.data.split(":")[1]
+    
+    await state.update_data(target_service=s_name)
+    await state.set_state(AdminStates.waiting_for_new_price)
+    
+    current_price = SERVICES_PRICING[s_name]['price']
+    await callback.message.edit_text(
+        f"📈 **Adjust Pricing for {s_name}**\n\n"
+        f"The current retail price is **₱{current_price:.2f}**.\n\n"
+        "To update the price and allow the system to purchase more expensive HeroSMS nodes, type the new price (e.g., `6.50` or `7.00`) and send it to the bot:",
+        reply_markup=admin_back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@router.message(AdminStates.waiting_for_new_price)
+async def process_admin_new_price(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    
+    try:
+        new_price = float(message.text)
+        if new_price <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Invalid format. Please type a valid number (e.g., `7.50`).")
+
+    data = await state.get_data()
+    s_name = data.get("target_service")
+    await state.clear()
+
+    try: await message.delete()
+    except Exception: pass
+
+    if s_name in SERVICES_PRICING:
+        SERVICES_PRICING[s_name]["price"] = new_price
+        success_text = f"✅ **Success!** Retail price for **{s_name}** has been updated to **₱{new_price:.2f}**."
+    else:
+        success_text = "❌ **Error:** Service profile could not be located in memory."
+
+    stats_text = await generate_admin_stats_text()
+    await message.answer(f"{success_text}\n\n{stats_text}", reply_markup=get_admin_dashboard_markup(), parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("admin_log_"))
 async def cb_admin_logs(callback: types.CallbackQuery):
