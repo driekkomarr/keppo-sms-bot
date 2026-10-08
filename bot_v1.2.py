@@ -35,7 +35,7 @@ SERVICES_PRICING = {
     "PHBINGO": {"code": "ot", "price": 5.00, "stock": 100, "operator": "any"},     
     "TARA 777": {"code": "ot", "price": 5.00, "stock": 100, "operator": "any"},
 "JOYRIDE": {"code": "ot", "price": 6.00, "stock": 100, "operator": "any"},
-    "GINTO 777": {"code": "ot", "price": 7.00, "stock": 100, "operator": "any"}  
+    "VIBER": {"code": "vi", "price": 7.00, "stock": 100, "operator": "any"}  
 }
 
 # --- INITIALIZE CORE CLIENTS ---
