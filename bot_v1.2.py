@@ -32,8 +32,8 @@ USD_TO_PHP_RATE = 60.50
 
 # --- PRICING, STOCKS & OPERATOR PROFILES ---
 SERVICES_PRICING = {
-    "UNO": {"code": "ot", "price": 7.00, "stock": 100, "operator": "any"}     
- #   "TARA 777": {"code": "ot", "price": #5.00, "stock": 100, "operator": "any"},
+    "UNO": {"code": "ot", "price": 7.00, "stock": 100, "operator": "any"},     
+    "CASINO +": {"code": "ot", "price": 5.00, "stock": 100, "operator": "any"}
 #"JOYRIDE": {"code": "ot", "price": 6.00, #"stock": 100, "operator": "any"},
  #   "VIBER": {"code": "vi", "price": #7.00, "stock": 100, "operator": "any"}  
 }
