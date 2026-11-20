@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: keppo-sms-bot
+    runtime: docker
+    plan: free
+    region: singapore
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: HERO_SMS_API_KEY
+        sync: false
+      - key: HERO_SMS_BASE_URL
+        value: https://hero-sms.com/stubs/handler_api.php
+      - key: PORT
+        value: 8080

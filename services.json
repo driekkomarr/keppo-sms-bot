@@ -10,5 +10,11 @@
     "price": 5.0,
     "stock": 100,
     "operator": "any"
+  },
+  "bossing": {
+    "code": "ot",
+    "price": 2.0,
+    "stock": 100,
+    "operator": "any"
   }
 }
