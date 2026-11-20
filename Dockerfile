@@ -20,3 +20,4 @@ EXPOSE 8080
 
 # Start the telegram bot
 CMD ["python", "bot_v1.2.py"]
+

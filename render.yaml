@@ -19,3 +19,4 @@ services:
         value: https://hero-sms.com/stubs/handler_api.php
       - key: PORT
         value: 8080
+
