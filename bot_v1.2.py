@@ -80,6 +80,8 @@ class AdminStates(StatesGroup):
     waiting_for_new_service_name = State()
     waiting_for_new_service_code = State()
     waiting_for_new_service_price = State()
+    waiting_for_topup_target_id = State()
+    waiting_for_topup_amount = State()
 
 # --- USER ACCESS MANAGEMENT (WHITELIST) ---
 ALLOWED_USERS_FILE = "allowed_users.json"
@@ -624,14 +626,38 @@ async def cb_lifecycle_mutation(callback: types.CallbackQuery, state: FSMContext
 # 👑 EXCLUSIVE ADMINISTRATION SUITE
 # ==========================================
 
+async def get_herosms_balance() -> str:
+    if not HERO_SMS_KEY:
+        return "Not Configured"
+    try:
+        client = http_client if http_client else httpx.AsyncClient(timeout=5.0)
+        resp = await client.get(HERO_SMS_URL, params={"api_key": HERO_SMS_KEY, "action": "getBalance"}, timeout=5.0)
+        if resp.text.startswith("ACCESS_BALANCE:"):
+            bal_usd = float(resp.text.split(":")[1])
+            bal_php = bal_usd * USD_TO_PHP_RATE
+            return f"${bal_usd:.2f} (~₱{bal_php:.2f})"
+        return f"{resp.text}"
+    except Exception:
+        return "Offline/Unreachable"
+
 def get_admin_dashboard_markup():
     kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="📢 Send Announcement Blast", callback_data="admin_trigger_broadcast"))
+    # Row 1: Direct Wallet Injection & Top-up Logs
+    kb.row(
+        types.InlineKeyboardButton(text="💳 Top Up User Wallet", callback_data="adm_topup_menu"),
+        types.InlineKeyboardButton(text="📥 Top-Up Logs", callback_data="admin_log_topups")
+    )
+    # Row 2: User Access & Sales
     kb.row(
         types.InlineKeyboardButton(text="👥 Manage User Access", callback_data="admin_manage_users"),
         types.InlineKeyboardButton(text="🛒 Recent Sales", callback_data="admin_log_sales")
     )
-    # Service Creation Tool
+    # Row 3: Broadcast & Provider Portal
+    kb.row(
+        types.InlineKeyboardButton(text="📢 Broadcast Blast", callback_data="admin_trigger_broadcast"),
+        types.InlineKeyboardButton(text="🌐 HeroSMS Portal", url="https://hero-sms.com/user/balance")
+    )
+    # Row 4: Service Creation Tool
     kb.row(types.InlineKeyboardButton(text="➕ Add New Service", callback_data="adm_add_service"))
 
     for s_name, s_meta in SERVICES_PRICING.items():
@@ -652,6 +678,7 @@ async def generate_admin_stats_text():
     try:
         users_query = await db_execute(supabase.table("users").select("telegram_id"))
         topups_query = await db_execute(supabase.table("topup_logs").select("amount", "created_at"))
+        hero_bal = await get_herosms_balance()
 
         total_users = len(users_query.data) if users_query.data else 0
         allowed_users_count = len(load_allowed_users())
@@ -666,7 +693,8 @@ async def generate_admin_stats_text():
 
         return (
             "👑 **TeleBOT System Administrator Console**\n\n"
-            f"📊 **Live Revenue Dashboard:**\n"
+            f"📊 **Live Revenue & System Dashboard:**\n"
+            f"• **HeroSMS Provider Balance:** `{hero_bal}`\n"
             f"• **Today's Gross Top-Ups:** ₱`{today_total:.2f}`\n"
             f"• **All-Time Gross Top-Ups:** ₱`{all_time_total:.2f}`\n"
             f"• **Total Registered Accounts:** `{total_users}`\n"
@@ -863,6 +891,193 @@ async def cb_admin_delete_service(callback: types.CallbackQuery):
 
     stats_text = await generate_admin_stats_text()
     await callback.message.edit_text(stats_text, reply_markup=get_admin_dashboard_markup(), parse_mode="Markdown")
+
+# --- ADMIN WALLET TOP-UP ENGINE ---
+@router.callback_query(F.data == "adm_topup_menu")
+async def cb_admin_topup_menu(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await state.clear()
+    
+    allowed_ids = load_allowed_users()
+    
+    kb = InlineKeyboardBuilder()
+    # Admin self top-up button
+    kb.row(types.InlineKeyboardButton(text=f"👑 Top Up Admin (Self: {ADMIN_ID})", callback_data=f"adm_topup_sel:{ADMIN_ID}"))
+    
+    # Authorized users buttons
+    for uid in sorted(allowed_ids):
+        if uid != ADMIN_ID:
+            kb.row(types.InlineKeyboardButton(text=f"👤 User: {uid}", callback_data=f"adm_topup_sel:{uid}"))
+            
+    kb.row(types.InlineKeyboardButton(text="✍️ Enter Telegram ID Manually", callback_data="adm_topup_manual"))
+    kb.row(types.InlineKeyboardButton(text="🔙 Back to Admin Dashboard", callback_data="admin_dashboard_home"))
+    
+    text = (
+        "💳 **Admin Wallet Top-Up Suite**\n\n"
+        "Select an account to inject balance into, or enter any numeric Telegram ID manually:"
+    )
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "adm_topup_manual")
+async def cb_admin_topup_manual(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await state.set_state(AdminStates.waiting_for_topup_target_id)
+    await callback.message.edit_text(
+        "💳 **Manual Wallet Top-Up**\n\n"
+        "Please type and send the **Telegram ID** (numeric) of the user you want to top up:",
+        reply_markup=admin_back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@router.message(AdminStates.waiting_for_topup_target_id)
+async def process_admin_topup_target_id(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        target_id = int(message.text.strip())
+        if target_id <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Invalid format. Please enter a valid numeric Telegram ID (e.g. `1234567890`):")
+
+    try: await message.delete()
+    except Exception: pass
+
+    await show_topup_amount_selection(message, state, target_id, is_edit=False)
+
+@router.callback_query(F.data.startswith("adm_topup_sel:"))
+async def cb_admin_topup_sel(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    target_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    await show_topup_amount_selection(callback.message, state, target_id, is_edit=True)
+
+async def show_topup_amount_selection(target_msg: types.Message, state: FSMContext, target_id: int, is_edit: bool = True):
+    await state.update_data(topup_target_id=target_id)
+    await state.set_state(AdminStates.waiting_for_topup_amount)
+    
+    current_balance = 0.00
+    username = "Anonymous"
+    try:
+        u_res = await db_execute(supabase.table("users").select("balance, username").eq("telegram_id", target_id))
+        if u_res.data:
+            current_balance = float(u_res.data[0].get("balance", 0.00) or 0.00)
+            username = u_res.data[0].get("username") or "Anonymous"
+    except Exception:
+        pass
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        types.InlineKeyboardButton(text="+₱50", callback_data="adm_topup_amt:50"),
+        types.InlineKeyboardButton(text="+₱100", callback_data="adm_topup_amt:100"),
+        types.InlineKeyboardButton(text="+₱200", callback_data="adm_topup_amt:200")
+    )
+    kb.row(
+        types.InlineKeyboardButton(text="+₱500", callback_data="adm_topup_amt:500"),
+        types.InlineKeyboardButton(text="+₱1000", callback_data="adm_topup_amt:1000"),
+        types.InlineKeyboardButton(text="+₱2000", callback_data="adm_topup_amt:2000")
+    )
+    kb.row(types.InlineKeyboardButton(text="🔙 Back to Top-Up Menu", callback_data="adm_topup_menu"))
+
+    text = (
+        f"💳 **Credit Wallet Balance**\n\n"
+        f"• **Target ID:** `{target_id}`\n"
+        f"• **Username:** @{username}\n"
+        f"• **Current Balance:** **₱{current_balance:.2f}**\n\n"
+        "Click a preset amount button below or **type a custom amount** in chat (e.g. `150` or `350.50`):"
+    )
+    if is_edit:
+        await target_msg.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+    else:
+        await target_msg.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+
+@router.callback_query(F.data.startswith("adm_topup_amt:"))
+async def cb_admin_topup_amt(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    amt = float(callback.data.split(":")[1])
+    data = await state.get_data()
+    target_id = data.get("topup_target_id")
+    if not target_id:
+        await callback.answer("Session expired. Please select the target user again.", show_alert=True)
+        return await cb_admin_topup_menu(callback, state)
+    await state.clear()
+    await callback.answer()
+    await execute_topup_credit(callback.message, target_id, amt, is_edit=True)
+
+@router.message(AdminStates.waiting_for_topup_amount)
+async def process_admin_topup_custom_amount(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        amt = float(message.text.strip())
+        if amt <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Invalid amount. Please enter a positive number (e.g. `150` or `500`):")
+
+    data = await state.get_data()
+    target_id = data.get("topup_target_id")
+    await state.clear()
+    try: await message.delete()
+    except Exception: pass
+
+    if not target_id:
+        return await message.answer("❌ Target user lost. Please restart from `/admin`.", reply_markup=admin_back_keyboard())
+
+    await execute_topup_credit(message, target_id, amt, is_edit=False)
+
+async def execute_topup_credit(target_message: types.Message, target_id: int, amount: float, is_edit: bool = False):
+    try:
+        # 1. Ensure user record exists
+        await db_execute(supabase.table("users").upsert({"telegram_id": target_id}, on_conflict="telegram_id"))
+        
+        # 2. Add balance using refund_balance RPC
+        await db_execute(supabase.rpc("refund_balance", {"user_id": target_id, "refund_amount": amount}))
+        
+        # 3. Log to topup_logs
+        await db_execute(supabase.table("topup_logs").insert({"telegram_id": target_id, "amount": amount}))
+        
+        # 4. Fetch updated balance
+        u_res = await db_execute(supabase.table("users").select("balance").eq("telegram_id", target_id))
+        new_bal = float(u_res.data[0]["balance"]) if u_res.data else amount
+
+        admin_conf = (
+            f"✅ **Top-Up Successful!**\n\n"
+            f"• **Target ID:** `{target_id}`\n"
+            f"• **Amount Credited:** **+₱{amount:.2f}**\n"
+            f"• **New Balance:** **₱{new_bal:.2f}**\n\n"
+            f"The account balance has been updated immediately."
+        )
+        
+        # 5. Notify user if not admin
+        if target_id != ADMIN_ID:
+            try:
+                await bot.send_message(
+                    chat_id=target_id,
+                    text=(
+                        f"🎉 **Wallet Top-Up Credited!**\n\n"
+                        f"The Administrator has added **₱{amount:.2f}** to your bot wallet.\n"
+                        f"💰 **Current Balance:** **₱{new_bal:.2f}**\n\n"
+                        f"You can now use **📞 Buy Numbers** or **🔁 Extend Numbers**."
+                    ),
+                    reply_markup=main_menu_keyboard(),
+                    parse_mode="Markdown"
+                )
+            except Exception as notif_err:
+                logging.warning(f"Could not notify user {target_id} of top-up: {notif_err}")
+
+        kb = InlineKeyboardBuilder()
+        kb.row(types.InlineKeyboardButton(text="💳 Top Up Another Account", callback_data="adm_topup_menu"))
+        kb.row(types.InlineKeyboardButton(text="🔙 Back to Admin Dashboard", callback_data="admin_dashboard_home"))
+
+        if is_edit:
+            await target_message.edit_text(admin_conf, reply_markup=kb.as_markup(), parse_mode="Markdown")
+        else:
+            await target_message.answer(admin_conf, reply_markup=kb.as_markup(), parse_mode="Markdown")
+    except Exception as e:
+        err_text = f"❌ **Top-Up Transaction Failed!**\n\nError: `{e}`"
+        if is_edit:
+            await target_message.edit_text(err_text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+        else:
+            await target_message.answer(err_text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("admin_log_"))
 async def cb_admin_logs(callback: types.CallbackQuery):

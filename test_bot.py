@@ -72,14 +72,25 @@ class TestBotLogic(unittest.TestCase):
     def test_admin_dashboard_buttons(self):
         kb = bot_module.get_admin_dashboard_markup()
         callback_datas = []
+        urls = []
         for row in kb.inline_keyboard:
             for b in row:
-                callback_datas.append(b.callback_data)
+                if b.callback_data:
+                    callback_datas.append(b.callback_data)
+                if b.url:
+                    urls.append(b.url)
         
         self.assertIn("admin_manage_users", callback_datas)
         self.assertIn("adm_add_service", callback_datas)
-        self.assertNotIn("admin_log_topups", callback_datas)
-        print("✅ Test 5 Passed: Admin dashboard contains User Access Management and Add Service buttons")
+        self.assertIn("adm_topup_menu", callback_datas)
+        self.assertIn("admin_log_topups", callback_datas)
+        self.assertTrue(any("hero-sms.com" in u for u in urls))
+        print("✅ Test 5 Passed: Admin dashboard contains Top Up, Logs, User Access, and HeroSMS portal buttons")
+
+    def test_admin_states_topup(self):
+        self.assertTrue(hasattr(bot_module.AdminStates, "waiting_for_topup_target_id"))
+        self.assertTrue(hasattr(bot_module.AdminStates, "waiting_for_topup_amount"))
+        print("✅ Test 6 Passed: AdminStates has topup states defined")
 
     def test_service_management_and_persistence(self):
         # 1. Add new test service
