@@ -1,0 +1,14 @@
+{
+  "UNO": {
+    "code": "ot",
+    "price": 7.0,
+    "stock": 100,
+    "operator": "any"
+  },
+  "CASINO +": {
+    "code": "ot",
+    "price": 5.0,
+    "stock": 100,
+    "operator": "any"
+  }
+}
