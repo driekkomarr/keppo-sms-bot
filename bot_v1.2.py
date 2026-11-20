@@ -246,7 +246,7 @@ async def cmd_buy_again(message: types.Message, state: FSMContext):
     if not is_user_allowed(tg_id):
         return await message.answer("⛔ **Access Denied.** You are not authorized to use this bot.")
 
-    res = await db_execute(supabase.table("activations").select("service").eq("telegram_id", tg_id).order("activation_id", descending=True).limit(1))
+    res = await db_execute(supabase.table("activations").select("service").eq("telegram_id", tg_id).order("activation_id", desc=True).limit(1))
 
     if not res.data:
         await send_or_edit_transient(message, state, "❌ No previous transaction histories found to clone.", inline_back_keyboard())
@@ -271,7 +271,7 @@ async def menu_extend_numbers_text(message: types.Message, state: FSMContext):
         supabase.table("activations")
         .select("*")
         .eq("telegram_id", user_id)
-        .order("activation_id", descending=True)
+        .order("activation_id", desc=True)
         .limit(6)
     )
 
